@@ -1,0 +1,12 @@
+.DS_Store
+/bin/
+/coverage.out
+/tmp/
+*.db
+*.db-shm
+*.db-wal
+*.key
+.claude/
+.cursor/
+docs/007*
+
