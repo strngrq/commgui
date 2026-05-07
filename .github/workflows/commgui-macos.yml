@@ -1,0 +1,142 @@
+name: Build commgui for macOS
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: commgui darwin/${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            artifact: commgui-darwin-arm64
+            runner: macos-latest
+            deployment_target: "15.0"
+          - arch: amd64
+            artifact: commgui-darwin-amd64
+            runner: macos-15-intel
+            deployment_target: "14.0"
+
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install frontend dependencies
+        working-directory: cmd/commgui/frontend
+        run: npm install
+
+      - name: Build libopus (static)
+        run: |
+          curl -fsSLO "https://github.com/xiph/opus/releases/download/v1.5.2/opus-1.5.2.tar.gz"
+          tar xzf opus-1.5.2.tar.gz
+          cd opus-1.5.2
+          ./configure \
+            --prefix="$(pwd)/stage" \
+            --disable-shared \
+            --enable-static \
+            --disable-doc \
+            --disable-extra-programs
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+          echo "OPUS_PREFIX=$(pwd)/stage" >> $GITHUB_ENV
+
+      - name: Build libspeexdsp (static)
+        run: |
+          curl -fsSLO "https://github.com/xiph/speexdsp/archive/refs/tags/SpeexDSP-1.2.1.tar.gz"
+          tar xzf SpeexDSP-1.2.1.tar.gz
+          cd speexdsp-SpeexDSP-1.2.1
+          brew install autoconf automake libtool
+          autoreconf -i
+          ./configure \
+            --prefix="$(pwd)/stage" \
+            --disable-shared \
+            --enable-static
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+          echo "SPEEXDSP_PREFIX=$(pwd)/stage" >> $GITHUB_ENV
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+
+      - name: Build commgui
+        working-directory: cmd/commgui
+        run: |
+          export CGO_CFLAGS="-I${OPUS_PREFIX}/include -I${SPEEXDSP_PREFIX}/include"
+          export CGO_LDFLAGS="-Wl,-force_load,${OPUS_PREFIX}/lib/libopus.a -Wl,-force_load,${SPEEXDSP_PREFIX}/lib/libspeexdsp.a -lm"
+          wails build
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          APP="cmd/commgui/build/bin/commgui.app"
+          BIN="cmd/commgui/build/bin/commgui"
+          if [ -d "$APP" ]; then
+            echo "Found app bundle at $APP"
+            echo "--- Info.plist microphone keys ---"
+            /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$APP/Contents/Info.plist" \
+              || { echo "ERROR: NSMicrophoneUsageDescription missing in Info.plist"; exit 1; }
+            cp -R "$APP" "dist/${{ matrix.artifact }}.app"
+            DEST="dist/${{ matrix.artifact }}.app"
+            # ad-hoc codesign so macOS TCC has a stable code-directory hash to bind
+            # the microphone permission to (without this, TCC may not show the prompt
+            # or remember the decision across launches)
+            codesign --force --deep --sign - "$DEST"
+            codesign -dv "$DEST" 2>&1 | head -5 || true
+            file "$APP/Contents/MacOS/"* 2>/dev/null || true
+            # verify opus is statically linked
+            otool -L "$APP/Contents/MacOS/"* 2>/dev/null | grep opus && echo "ERROR: dynamic opus!" && exit 1 || echo "OK: opus is static"
+            otool -L "$APP/Contents/MacOS/"* 2>/dev/null | grep speexdsp && echo "ERROR: dynamic speexdsp!" && exit 1 || echo "OK: speexdsp is static"
+          elif [ -f "$BIN" ]; then
+            echo "Found binary at $BIN"
+            cp "$BIN" "dist/${{ matrix.artifact }}"
+            file "dist/${{ matrix.artifact }}"
+            otool -L "dist/${{ matrix.artifact }}" | grep opus && echo "ERROR: dynamic opus!" && exit 1 || echo "OK: opus is static"
+            otool -L "dist/${{ matrix.artifact }}" | grep speexdsp && echo "ERROR: dynamic speexdsp!" && exit 1 || echo "OK: speexdsp is static"
+          else
+            echo "ERROR: No build output found"
+            find cmd/commgui/build -type f 2>/dev/null || echo "build dir missing"
+            exit 1
+          fi
+
+      - name: Package DMG
+        run: |
+          cd dist
+          APP="${{ matrix.artifact }}.app"
+          DMG="${{ matrix.artifact }}.dmg"
+          if [ -d "$APP" ]; then
+            hdiutil create -volname commgui -srcfolder "$APP" -ov -format UDZO "$DMG"
+            shasum -a 256 "$DMG" > "${{ matrix.artifact }}.sha256"
+          elif [ -f "${{ matrix.artifact }}" ]; then
+            hdiutil create -volname commgui -srcfolder "${{ matrix.artifact }}" -ov -format UDZO "$DMG"
+            shasum -a 256 "$DMG" > "${{ matrix.artifact }}.sha256"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/${{ matrix.artifact }}.dmg
+            dist/${{ matrix.artifact }}.sha256
+          if-no-files-found: error

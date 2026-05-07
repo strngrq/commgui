@@ -1,0 +1,80 @@
+name: Build commgui for Linux
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: commgui linux/${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            artifact: commgui-linux-amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            artifact: commgui-linux-arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install frontend dependencies
+        working-directory: cmd/commgui/frontend
+        run: npm install
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libopus-dev libspeexdsp-dev libwebkit2gtk-4.1-dev pkg-config
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+
+      - name: Build commgui
+        working-directory: cmd/commgui
+        run: wails build -tags webkit2_41
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          BIN="cmd/commgui/build/bin/commgui"
+          if [ -f "$BIN" ]; then
+            cp "$BIN" "dist/${{ matrix.artifact }}"
+            file "dist/${{ matrix.artifact }}"
+          else
+            echo "ERROR: No build output found"
+            find cmd/commgui/build -type f 2>/dev/null || echo "build dir missing"
+            exit 1
+          fi
+
+      - name: Package artifact
+        run: |
+          cd dist
+          sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
+          tar -czf "${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}" "${{ matrix.artifact }}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
