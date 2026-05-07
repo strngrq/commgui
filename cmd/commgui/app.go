@@ -45,6 +45,7 @@ type App struct {
 	listenerCtx     context.Context
 	listenerCancel  context.CancelFunc
 	pushListening   bool
+	pushHealthy     bool
 	pushCancel      context.CancelFunc
 	muted           bool
 	outputVolume    int // 0..100
@@ -551,11 +552,18 @@ func (a *App) ServerStatus() (ServerStatusDTO, error) {
 		}
 	}
 
-	res, err := a.client.Health.Check(a.ctx, "")
+	// CheckLite вместо Check: пробное /ws/push в Health.Check выбило бы
+	// наш собственный push-listener (4003 replaced), а сервер в журнале
+	// клиента это видится как push_listener_disconnect.
+	res, err := a.client.Health.CheckLite(a.ctx, "")
+	a.mu.Lock()
+	pushAlive := a.pushHealthy
+	a.mu.Unlock()
 	if err != nil {
 		return ServerStatusDTO{
 			ServerURL: serverURL,
 			ServerFP:  serverFP,
+			PushWS:    pushAlive,
 		}, nil
 	}
 
@@ -566,7 +574,7 @@ func (a *App) ServerStatus() (ServerStatusDTO, error) {
 	return ServerStatusDTO{
 		ServerURL: serverURL,
 		ServerFP:  serverFP,
-		PushWS:    res.PushWSOK,
+		PushWS:    pushAlive,
 		Version:   version,
 	}, nil
 }
@@ -1196,6 +1204,7 @@ func (a *App) stopPushListener() {
 		a.pushCancel = nil
 	}
 	a.pushListening = false
+	a.pushHealthy = false
 	a.mu.Unlock()
 	a.logDebug("push_listener_stop", nil)
 }
@@ -1209,7 +1218,13 @@ func (a *App) pumpPush(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		a.mu.Lock()
+		a.pushHealthy = true
+		a.mu.Unlock()
 		err := a.client.Health.ListenPush(ctx, domain.PushListenOpts{}, a.handlePushWakeup)
+		a.mu.Lock()
+		a.pushHealthy = false
+		a.mu.Unlock()
 		if ctx.Err() != nil {
 			return
 		}

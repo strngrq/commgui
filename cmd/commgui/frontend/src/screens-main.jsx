@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import Icon from './icons';
-import { Avatar, AppBar, ConnBanner, SectionHeader } from './components';
+import { Avatar, AppBar, ConnBanner, SectionHeader, ConfirmDialog } from './components';
 import { api, on } from './bindings';
 
 // ==============================================================================
@@ -222,6 +222,7 @@ export function ProfileTab({ go, profile, style }) {
   const [info, setInfo] = useState(null);
   const [editing, setEditing] = useState(false);
   const [newName, setNewName] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   useEffect(() => {
     api.profile().then(setInfo).catch(() => {});
@@ -234,8 +235,8 @@ export function ProfileTab({ go, profile, style }) {
     setEditing(false);
   };
 
-  const handleDeleteProfile = async () => {
-    if (!confirm('Удалить профиль? Все локальные данные будут удалены.')) return;
+  const doDeleteProfile = () => {
+    setConfirmDelete(false);
     api.deleteProfile().then(() => go('welcome')).catch(e => {
       alert('Ошибка удаления профиля: ' + (e?.message || e || ''));
     });
@@ -302,11 +303,20 @@ export function ProfileTab({ go, profile, style }) {
         )}
 
         <div style={{ marginTop: 24, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <button className="btn btn-text btn-block" style={{ color: 'var(--md-error)' }} onClick={handleDeleteProfile}>
+          <button className="btn btn-text btn-block" style={{ color: 'var(--md-error)' }} onClick={() => setConfirmDelete(true)}>
             <Icon name="logout" size={18} color="var(--md-error)" /> Удалить профиль
           </button>
         </div>
       </div>
+      <ConfirmDialog
+        open={confirmDelete}
+        title="Удалить профиль?"
+        message="Все локальные данные будут удалены."
+        confirmText="Удалить"
+        danger
+        onConfirm={doDeleteProfile}
+        onCancel={() => setConfirmDelete(false)}
+      />
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import Icon from './icons';
-import { Avatar, AppBar, Toggle, SectionHeader } from './components';
+import { Avatar, AppBar, Toggle, SectionHeader, ConfirmDialog } from './components';
 import { api } from './bindings';
 
 // ==============================================================================
@@ -160,6 +160,7 @@ export function SettingsScreen({ go }) {
   const [echoCancel, setEchoCancel] = useState(true);
   const [aecTailMs, setAecTailMs] = useState(200);
   const [serverInfo, setServerInfo] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   useEffect(() => {
     api.listAudioDevices().then(setAudioDevices).catch(() => {});
@@ -277,13 +278,24 @@ export function SettingsScreen({ go }) {
           <Icon name="chevron-right" size={20} color="var(--md-on-surface-variant)" />
         } onClick={() => go('server-info')} />
 
-        <SettingsRow icon="logout" title="Удалить профиль" danger onClick={() => {
-          if (!confirm('Удалить профиль? Все локальные данные будут удалены.')) return;
-          api.deleteProfile().then(() => go('welcome')).catch(() => {});
-        }} />
+        <SettingsRow icon="logout" title="Удалить профиль" danger onClick={() => setConfirmDelete(true)} />
 
         <div style={{ height: 24 }} />
       </div>
+      <ConfirmDialog
+        open={confirmDelete}
+        title="Удалить профиль?"
+        message="Все локальные данные будут удалены."
+        confirmText="Удалить"
+        danger
+        onConfirm={() => {
+          setConfirmDelete(false);
+          api.deleteProfile().then(() => go('welcome')).catch(e => {
+            alert('Ошибка удаления профиля: ' + (e?.message || e || ''));
+          });
+        }}
+        onCancel={() => setConfirmDelete(false)}
+      />
     </div>
   );
 }

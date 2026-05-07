@@ -117,3 +117,28 @@ export function Toggle({ on, onClick }) {
     />
   );
 }
+
+// Modal confirm dialog. Replaces native window.confirm(), которое в
+// Wails-WKWebView на macOS ведёт себя нестабильно (диалог не появляется
+// или возвращает Promise вместо boolean).
+export function ConfirmDialog({ open, title, message, confirmText = 'OK', cancelText = 'Отмена', danger, onConfirm, onCancel }) {
+  if (!open) return null;
+  return (
+    <div className="dialog-overlay" onClick={onCancel}>
+      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+        {title && <div className="title">{title}</div>}
+        {message && <div className="body">{message}</div>}
+        <div className="actions">
+          <button className="btn btn-text" onClick={onCancel}>{cancelText}</button>
+          <button
+            className="btn btn-text"
+            style={danger ? { color: 'var(--md-error)' } : undefined}
+            onClick={onConfirm}
+          >
+            {confirmText}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

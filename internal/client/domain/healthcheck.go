@@ -12,29 +12,18 @@ type HealthCheck struct {
 }
 
 // Check возвращает статус сервера (server-info + push WS).
+//
+// Внимание: Check открывает пробное /ws/push, что для пользователя с
+// активным push-listener'ом (commgui, длинноживущие клиенты) приводит к
+// серверному закрытию старого соединения со статусом 4003 «replaced»
+// (см. 002 §4.4). В таких случаях используйте CheckLite, а состояние
+// push-канала отдавайте из локального state listener'а.
 func (h *HealthCheck) Check(ctx context.Context, serverOverride string) (*HealthResult, error) {
-	c := h.client
-	serverURL := serverOverride
-	if serverURL == "" && c.state != nil {
-		serverURL = chooseServer(c.state)
-	}
-	if serverURL == "" {
-		return nil, ErrMissingServerURL()
-	}
-
-	info, err := c.Registrar.fetchServerInfo(ctx, serverURL)
+	res, serverURL, err := h.checkServerInfo(ctx, serverOverride)
 	if err != nil {
 		return nil, err
 	}
-
-	res := &HealthResult{
-		ServerInfo: map[string]any{
-			"server_pubkey": info.ServerPubkey,
-			"version":       info.Version,
-		},
-		PushWSOK: false,
-	}
-
+	c := h.client
 	if c.state != nil && c.state.Session.Token != "" {
 		pushConn, err := c.ports.Signaling.OpenPush(ctx, serverURL, c.state.Session.Token)
 		if err == nil {
@@ -45,6 +34,36 @@ func (h *HealthCheck) Check(ctx context.Context, serverOverride string) (*Health
 		}
 	}
 	return res, nil
+}
+
+// CheckLite возвращает только server-info, не открывая /ws/push. Подходит
+// клиентам, которые сами держат push-listener: пробное /ws/push выбило бы
+// его (4003 replaced).
+func (h *HealthCheck) CheckLite(ctx context.Context, serverOverride string) (*HealthResult, error) {
+	res, _, err := h.checkServerInfo(ctx, serverOverride)
+	return res, err
+}
+
+func (h *HealthCheck) checkServerInfo(ctx context.Context, serverOverride string) (*HealthResult, string, error) {
+	c := h.client
+	serverURL := serverOverride
+	if serverURL == "" && c.state != nil {
+		serverURL = chooseServer(c.state)
+	}
+	if serverURL == "" {
+		return nil, "", ErrMissingServerURL()
+	}
+	info, err := c.Registrar.fetchServerInfo(ctx, serverURL)
+	if err != nil {
+		return nil, serverURL, err
+	}
+	return &HealthResult{
+		ServerInfo: map[string]any{
+			"server_pubkey": info.ServerPubkey,
+			"version":       info.Version,
+		},
+		PushWSOK: false,
+	}, serverURL, nil
 }
 
 // TryRelay проверяет relay-возможности TURN-сервера: подключается,
