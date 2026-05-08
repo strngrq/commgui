@@ -259,7 +259,12 @@ func (s *callSession) pumpSignaling() {
 			return
 		case "call.candidate":
 			if c, err := candidateFromPayload(payload); err == nil {
-				_ = s.cfg.rtc.AddRemoteCandidate(c)
+				s.emit(CallEvent{Kind: CallEventRemoteCandidate, Detail: candidateDetail(c.Candidate, c.SDPMid, int(c.SDPMLineIndex))})
+				if addErr := s.cfg.rtc.AddRemoteCandidate(c); addErr != nil {
+					s.emit(CallEvent{Kind: CallEventError, Err: addErr, Detail: map[string]any{"phase": "add-remote-candidate", "candidate": c.Candidate}})
+				}
+			} else {
+				s.emit(CallEvent{Kind: CallEventError, Err: err, Detail: map[string]any{"phase": "parse-remote-candidate"}})
 			}
 		case "call.hangup", "call.cancel":
 			s.emit(CallEvent{Kind: CallEventRemoteHangup})
@@ -504,6 +509,7 @@ func (s *callSession) pumpLocalCandidates() {
 				"sdpMid":        c.SDPMid,
 				"sdpMLineIndex": c.SDPMLineIndex,
 			}
+			s.emit(CallEvent{Kind: CallEventLocalCandidate, Detail: candidateDetail(c.Candidate, c.SDPMid, int(c.SDPMLineIndex))})
 			_ = s.sendPayload(s.ctx, map[string]any{
 				"type":      "call.candidate",
 				"call_id":   s.cfg.callID,
@@ -512,6 +518,48 @@ func (s *callSession) pumpLocalCandidates() {
 			})
 		}
 	}
+}
+
+// candidateDetail парсит SDP candidate-строку (RFC 5245) и возвращает
+// поля для лога: тип (host/srflx/relay/prflx), транспорт, адрес, порт.
+// Формат: "candidate:<foundation> <component> <transport> <priority> <addr> <port> typ <type> ..."
+func candidateDetail(candidate, sdpMid string, sdpMLineIndex int) map[string]any {
+	d := map[string]any{
+		"candidate":     candidate,
+		"sdpMid":        sdpMid,
+		"sdpMLineIndex": sdpMLineIndex,
+	}
+	parts := splitFields(candidate)
+	if len(parts) >= 8 {
+		d["protocol"] = parts[2]
+		d["addr"] = parts[4]
+		d["port"] = parts[5]
+		// "typ" в позиции 6, тип — 7.
+		if parts[6] == "typ" {
+			d["type"] = parts[7]
+		}
+	}
+	return d
+}
+
+// splitFields — простой токенизатор по пробелам без аллокации regexp'а.
+func splitFields(s string) []string {
+	out := make([]string, 0, 12)
+	start := -1
+	for i := 0; i < len(s); i++ {
+		if s[i] == ' ' || s[i] == '\t' {
+			if start >= 0 {
+				out = append(out, s[start:i])
+				start = -1
+			}
+		} else if start < 0 {
+			start = i
+		}
+	}
+	if start >= 0 {
+		out = append(out, s[start:])
+	}
+	return out
 }
 
 // ringTimeoutWatchdog для исходящих звонков: если за ringtime не пришёл answer,
@@ -552,13 +600,20 @@ func (s *callSession) handleAnswer(payload map[string]any) {
 	// подменил SDP, звонок отклоняется. Никакого fallback на «нет поля».
 	fpPayload, _ := payload["callee_dtls_fingerprint"].(string)
 	fpSDP := parseDTLSFingerprint(sdp)
+	s.emit(CallEvent{Kind: CallEventAnswerReceived, Detail: map[string]any{
+		"call_id":          s.cfg.callID,
+		"dtls_fp_payload":  fpPayload,
+		"dtls_fp_sdp":      fpSDP,
+		"sdp_lines":        countSDPLines(sdp),
+		"fp_match":         fpPayload != "" && fpSDP != "" && cryptox.ConstantTimeEqual([]byte(fpPayload), []byte(fpSDP)),
+	}})
 	if fpPayload == "" || fpSDP == "" || !cryptox.ConstantTimeEqual([]byte(fpPayload), []byte(fpSDP)) {
 		s.emit(CallEvent{Kind: CallEventError, Err: ErrInvalidCallAnswer("DTLS fingerprint mismatch")})
 		s.endWithOutcome("failed")
 		return
 	}
 	if err := s.cfg.rtc.SetRemoteDescription(port.SDP{Type: "answer", SDP: sdp}); err != nil {
-		s.emit(CallEvent{Kind: CallEventError, Err: err})
+		s.emit(CallEvent{Kind: CallEventError, Err: err, Detail: map[string]any{"phase": "set-remote-answer"}})
 		s.endWithOutcome("failed")
 		return
 	}

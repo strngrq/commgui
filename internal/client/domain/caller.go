@@ -28,6 +28,24 @@ const (
 	CallEventClosed CallEventKind = "closed"
 	// CallEventError — асинхронная ошибка; Err заполнен.
 	CallEventError CallEventKind = "error"
+	// CallEventLocalCandidate — собран локальный ICE-кандидат (отправлен пиру).
+	// Detail: {"candidate","sdpMid","sdpMLineIndex","type","protocol","addr","port"}.
+	CallEventLocalCandidate CallEventKind = "local-candidate"
+	// CallEventRemoteCandidate — получен ICE-кандидат от пира.
+	// Detail: те же поля, что и у local-candidate.
+	CallEventRemoteCandidate CallEventKind = "remote-candidate"
+	// CallEventOfferSent — call.offer ушёл пиру (исходящий звонок или ICE restart).
+	// Detail: {"call_id","dtls_fp","sdp_lines","ice_restart"}.
+	CallEventOfferSent CallEventKind = "offer-sent"
+	// CallEventAnswerReceived — пришёл call.answer от пира.
+	// Detail: {"call_id","dtls_fp_payload","dtls_fp_sdp","sdp_lines"}.
+	CallEventAnswerReceived CallEventKind = "answer-received"
+	// CallEventAnswerSent — call.answer ушёл пиру (мы приняли входящий).
+	// Detail: {"call_id","dtls_fp","sdp_lines"}.
+	CallEventAnswerSent CallEventKind = "answer-sent"
+	// CallEventTurnCredentials — получены TURN credentials с сервера.
+	// Detail: {"uris","ttl","username_len","credential_len","ok"}.
+	CallEventTurnCredentials CallEventKind = "turn-credentials"
 )
 
 // CallEvent — событие активной сессии.
@@ -37,6 +55,8 @@ type CallEvent struct {
 	ICEState string
 	Result   *CallResult
 	Err      error
+	// Detail — произвольные диагностические поля (см. комментарии у CallEventKind).
+	Detail map[string]any
 }
 
 // CallSession — активная сессия звонка. UI владеет ею до закрытия.
@@ -271,14 +291,28 @@ func (c *Caller) Outgoing(ctx context.Context, opts OutgoingOpts) (CallSession, 
 		return nil, err
 	}
 
-	rtc, err := c.webrtc.NewSession(ctx, port.WebRTCSessionOpts{
+	var (
+		turnUser, turnCred string
+		turnTTL            int64
+		turnURIs           []string
+		turnErr            error
+	)
+	if !opts.NoTurn {
+		turnUser, turnCred, turnTTL, turnURIs, turnErr = c.fetchTurnCredentials(ctx)
+	}
+	rtcOpts := port.WebRTCSessionOpts{
 		ServerURL: serverURL,
 		Token:     st.Session.Token,
-		NoTurn:    opts.NoTurn,
+		NoTurn:    opts.NoTurn || len(turnURIs) == 0,
 		Audio:     pipeline,
-	})
+	}
+	if len(turnURIs) > 0 {
+		rtcOpts.ICEServers = []port.ICEServer{{URLs: turnURIs, Username: turnUser, Credential: turnCred}}
+	}
+	rtc, err := c.webrtc.NewSession(ctx, rtcOpts)
 	if err != nil {
 		_ = sigConn.Close()
+		_ = pipeline.Close()
 		return nil, err
 	}
 
@@ -295,12 +329,13 @@ func (c *Caller) Outgoing(ctx context.Context, opts OutgoingOpts) (CallSession, 
 	}
 
 	callID := NewID()
+	offerFP := parseDTLSFingerprint(offer.SDP)
 	offerPub, _ := cryptox.DecodeBase64URL(opts.Contact.Pubkey, ed25519.PublicKeySize)
 	offerEnv, err := makeEnvelopeWithOpts(c.state(), c.priv(), opts.Contact.UserID, ed25519.PublicKey(offerPub), map[string]any{
 		"type":                    "call.offer",
 		"call_id":                 callID,
 		"sdp":                     offer.SDP,
-		"caller_dtls_fingerprint": parseDTLSFingerprint(offer.SDP),
+		"caller_dtls_fingerprint": offerFP,
 		"ts":                      time.Now().UnixMilli(),
 	}, 0, envelopeSignOpts{})
 	if err != nil {
@@ -328,7 +363,25 @@ func (c *Caller) Outgoing(ctx context.Context, opts OutgoingOpts) (CallSession, 
 		rtc:         rtc,
 		pipeline:       pipeline,
 		sentOfferEnvID: offerEnv.ID,
+		turnExpiresAt:  time.Now().Unix() + turnTTL,
+		turnUsername:   turnUser,
+		turnCredential: turnCred,
+		turnURIs:       turnURIs,
 	})
+	cs.emit(CallEvent{Kind: CallEventTurnCredentials, Detail: map[string]any{
+		"uris":           turnURIs,
+		"ttl":            turnTTL,
+		"username_len":   len(turnUser),
+		"credential_len": len(turnCred),
+		"ok":             turnErr == nil,
+		"err":            errString(turnErr),
+	}})
+	cs.emit(CallEvent{Kind: CallEventOfferSent, Detail: map[string]any{
+		"call_id":     callID,
+		"dtls_fp":     offerFP,
+		"sdp_lines":   countSDPLines(offer.SDP),
+		"ice_restart": false,
+	}})
 	go cs.run()
 	return cs, nil
 }
@@ -384,7 +437,7 @@ func (c *Caller) acceptIncoming(ctx context.Context, in IncomingCall, opts Accep
 
 	st := c.state()
 	serverURL := chooseServer(st)
-	turnUser, turnCred, turnTTL, turnURIs, _ := c.fetchTurnCredentials(ctx)
+	turnUser, turnCred, turnTTL, turnURIs, turnErr := c.fetchTurnCredentials(ctx)
 	rtcOpts := port.WebRTCSessionOpts{
 		ServerURL: serverURL,
 		Token:     st.Session.Token,
@@ -418,12 +471,13 @@ func (c *Caller) acceptIncoming(ctx context.Context, in IncomingCall, opts Accep
 		return nil, err
 	}
 
+	answerFP := parseDTLSFingerprint(answer.SDP)
 	acceptPub, _ := cryptox.DecodeBase64URL(in.From.Pubkey, ed25519.PublicKeySize)
 	if err := c.sendEnvelope(ctx, in.signaling, in.Envelope.From, ed25519.PublicKey(acceptPub), map[string]any{
 		"type":                    "call.answer",
 		"call_id":                 in.CallID,
 		"sdp":                     answer.SDP,
-		"callee_dtls_fingerprint": parseDTLSFingerprint(answer.SDP),
+		"callee_dtls_fingerprint": answerFP,
 		"ts":                      time.Now().UnixMilli(),
 	}); err != nil {
 		_ = rtc.Close()
@@ -449,8 +503,40 @@ func (c *Caller) acceptIncoming(ctx context.Context, in IncomingCall, opts Accep
 		turnCredential: turnCred,
 		turnURIs:       turnURIs,
 	})
+	cs.emit(CallEvent{Kind: CallEventTurnCredentials, Detail: map[string]any{
+		"uris":           turnURIs,
+		"ttl":            turnTTL,
+		"username_len":   len(turnUser),
+		"credential_len": len(turnCred),
+		"ok":             turnErr == nil,
+		"err":            errString(turnErr),
+	}})
+	cs.emit(CallEvent{Kind: CallEventAnswerSent, Detail: map[string]any{
+		"call_id":   in.CallID,
+		"dtls_fp":   answerFP,
+		"sdp_lines": countSDPLines(answer.SDP),
+	}})
 	go cs.run()
 	return cs, nil
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// countSDPLines возвращает число непустых строк в SDP — лёгкий маркер
+// для логирования размера/полноты SDP без дампа всего тела.
+func countSDPLines(sdp string) int {
+	n := 0
+	for _, ch := range sdp {
+		if ch == '\n' {
+			n++
+		}
+	}
+	return n
 }
 
 // declineIncoming шлёт call.reject и закрывает signaling.

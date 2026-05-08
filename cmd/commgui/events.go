@@ -43,12 +43,21 @@ func (b *eventBus) watchSession(sess domain.CallSession, peerUserID, peerName, d
 			"direction": direction,
 		})
 		for ev := range sess.Events() {
-			b.log("call_event", map[string]any{
+			logEntry := map[string]any{
 				"call_id": sess.ID(),
 				"kind":    string(ev.Kind),
 				"state":   string(ev.State),
 				"ice":     ev.ICEState,
-			})
+			}
+			if ev.Err != nil {
+				logEntry["error"] = ev.Err.Error()
+			}
+			for k, v := range ev.Detail {
+				if _, exists := logEntry[k]; !exists {
+					logEntry[k] = v
+				}
+			}
+			b.log("call_event", logEntry)
 			switch ev.Kind {
 			case domain.CallEventStateChange:
 				b.emit("call-state", map[string]any{
