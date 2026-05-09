@@ -24,6 +24,10 @@ type CallResult struct {
 	RecordPath        string `json:"record"`
 	RTPSent           int    `json:"rtp_sent"`
 	RTPReceived       int    `json:"rtp_received"`
+	// FailureReason — причина отказа: "signal_lost" для network-drop (§6c).
+	FailureReason string `json:"failure_reason,omitempty"`
+	// TimingMs — профилирование latency звонка (nil до Step 6).
+	TimingMs map[string]int64 `json:"timing_ms,omitempty"`
 }
 
 // CLIPresenter — форматированный вывод для одноразовых CLI-команд.

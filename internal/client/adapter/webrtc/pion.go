@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -96,16 +97,28 @@ type pionSession struct {
 	events     chan port.SessionEvent
 	candidates chan port.ICECandidate
 
-	mu          sync.Mutex
-	iceState    string
-	connected   bool
-	rtpSent     int
-	rtpReceived int
-	closedAt    time.Time
-	closeOnce   sync.Once
+	mu                sync.Mutex
+	iceState          string
+	connected         bool
+	rtpSent           int
+	rtpReceived       int
+	closedAt          time.Time
+	closeOnce         sync.Once
+	selectedCandidate string
+	// disconnectTimer срабатывает, если ICE задержался в Disconnected дольше
+	// iceDisconnectGrace. По срабатыванию эмитится NeedsRestart, чтобы
+	// перевыбрать пару (например, переключиться на relay при потере srflx-пути
+	// после смены интерфейса/выключения VPN).
+	disconnectTimer  *time.Timer
+	restartScheduled bool
 
 	outboundOnce sync.Once
 }
+
+// iceDisconnectGrace — сколько ждём в ICEConnectionStateDisconnected, прежде
+// чем эмитить NeedsRestart. Pion сам может вернуться в Connected по
+// consent-ping; даём ему пять секунд, потом форсируем ICE restart.
+const iceDisconnectGrace = 5 * time.Second
 
 // attachAudio привязывает AudioPipeline к pion-сессии.
 // Для AudioKindData создаётся DataChannel; для AudioKindAudio — Opus-трек,
@@ -213,10 +226,28 @@ func (s *pionSession) onICEStateChange(state webrtc.ICEConnectionState) {
 	s.iceState = state.String()
 	if state == webrtc.ICEConnectionStateConnected || state == webrtc.ICEConnectionStateCompleted {
 		s.connected = true
+		s.cancelDisconnectTimerLocked()
+		s.restartScheduled = false
+	}
+	if state == webrtc.ICEConnectionStateFailed || state == webrtc.ICEConnectionStateClosed {
+		s.cancelDisconnectTimerLocked()
+	}
+	if state == webrtc.ICEConnectionStateDisconnected {
+		s.armDisconnectTimerLocked(iceDisconnectGrace)
 	}
 	stateName := s.iceState
 	connected := s.connected
 	s.mu.Unlock()
+
+	// При connected/completed обновляем selected pair (вне mu — Pion API
+	// потенциально блокирующий).
+	if state == webrtc.ICEConnectionStateConnected || state == webrtc.ICEConnectionStateCompleted {
+		if pair := s.probeSelectedPair(); pair != "" {
+			s.mu.Lock()
+			s.selectedCandidate = pair
+			s.mu.Unlock()
+		}
+	}
 
 	s.emit(port.SessionEvent{Kind: port.SessionEventICEState, ICEState: stateName})
 	if connected && (state == webrtc.ICEConnectionStateConnected || state == webrtc.ICEConnectionStateCompleted) {
@@ -237,6 +268,75 @@ func (s *pionSession) onICEStateChange(state webrtc.ICEConnectionState) {
 	case webrtc.ICEConnectionStateClosed:
 		s.signalClosed(nil)
 	}
+}
+
+// armDisconnectTimerLocked запускает таймер на NeedsRestart, если ICE задержался
+// в Disconnected. Идемпотентен: повторный disconnected не перезапускает таймер.
+func (s *pionSession) armDisconnectTimerLocked(d time.Duration) {
+	if s.disconnectTimer != nil || s.restartScheduled {
+		return
+	}
+	s.disconnectTimer = time.AfterFunc(d, s.fireDisconnectRestart)
+}
+
+func (s *pionSession) cancelDisconnectTimerLocked() {
+	if s.disconnectTimer != nil {
+		s.disconnectTimer.Stop()
+		s.disconnectTimer = nil
+	}
+}
+
+func (s *pionSession) fireDisconnectRestart() {
+	s.mu.Lock()
+	s.disconnectTimer = nil
+	stuck := s.iceState == webrtc.ICEConnectionStateDisconnected.String() && !s.restartScheduled
+	if stuck {
+		s.restartScheduled = true
+	}
+	stateName := s.iceState
+	s.mu.Unlock()
+	if stuck {
+		s.emit(port.SessionEvent{Kind: port.SessionEventNeedsRestart, ICEState: stateName})
+	}
+}
+
+// probeSelectedPair достаёт текущую выбранную ICE-пару через первый sender'а
+// (transceiver) — для голосового вызова это media-DTLS-транспорт. Если pair
+// пока не выбран или метод вернул ошибку — возвращает пустую строку.
+func (s *pionSession) probeSelectedPair() string {
+	for _, snd := range s.pc.GetSenders() {
+		if pair := candidatePairFromTransport(snd.Transport()); pair != "" {
+			return pair
+		}
+	}
+	for _, rcv := range s.pc.GetReceivers() {
+		if pair := candidatePairFromTransport(rcv.Transport()); pair != "" {
+			return pair
+		}
+	}
+	return ""
+}
+
+func candidatePairFromTransport(t *webrtc.DTLSTransport) string {
+	if t == nil {
+		return ""
+	}
+	ice := t.ICETransport()
+	if ice == nil {
+		return ""
+	}
+	pair, err := ice.GetSelectedCandidatePair()
+	if err != nil || pair == nil {
+		return ""
+	}
+	return formatICECandidate(pair.Local) + " -> " + formatICECandidate(pair.Remote)
+}
+
+func formatICECandidate(c *webrtc.ICECandidate) string {
+	if c == nil {
+		return "?"
+	}
+	return c.Typ.String() + ":" + c.Address + ":" + strconv.Itoa(int(c.Port))
 }
 
 func (s *pionSession) onLocalCandidate(c *webrtc.ICECandidate) {
@@ -283,6 +383,7 @@ func (s *pionSession) signalClosed(err error) {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.closedAt = time.Now()
+		s.cancelDisconnectTimerLocked()
 		s.mu.Unlock()
 		s.emit(port.SessionEvent{Kind: port.SessionEventClosed, Err: err})
 		s.cancel()
@@ -293,8 +394,12 @@ func (s *pionSession) signalClosed(err error) {
 
 // CreateOffer / CreateAnswer / SetLocalDescription / SetRemoteDescription / AddRemoteCandidate.
 
-func (s *pionSession) CreateOffer() (port.SDP, error) {
-	o, err := s.pc.CreateOffer(nil)
+func (s *pionSession) CreateOffer(opts port.CreateOfferOpts) (port.SDP, error) {
+	var pionOpts *webrtc.OfferOptions
+	if opts.ICERestart {
+		pionOpts = &webrtc.OfferOptions{ICERestart: true}
+	}
+	o, err := s.pc.CreateOffer(pionOpts)
 	if err != nil {
 		return port.SDP{}, err
 	}
@@ -338,18 +443,30 @@ func (s *pionSession) Events() <-chan port.SessionEvent          { return s.even
 
 func (s *pionSession) Stats() port.SessionStats {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	end := time.Now()
 	if !s.closedAt.IsZero() {
 		end = s.closedAt
 	}
-	return port.SessionStats{
-		ICEState:    s.iceState,
-		Connected:   s.connected,
-		RTPSent:     s.rtpSent,
-		RTPReceived: s.rtpReceived,
-		Duration:    end.Sub(s.started),
+	stats := port.SessionStats{
+		ICEState:          s.iceState,
+		Connected:         s.connected,
+		RTPSent:           s.rtpSent,
+		RTPReceived:       s.rtpReceived,
+		Duration:          end.Sub(s.started),
+		SelectedCandidate: s.selectedCandidate,
 	}
+	s.mu.Unlock()
+	// Если pair ещё не запомнили (например, ICE только что connected, а
+	// onICEStateChange ещё не успел probe'нуть) — пробуем сейчас.
+	if stats.Connected && stats.SelectedCandidate == "" {
+		if pair := s.probeSelectedPair(); pair != "" {
+			s.mu.Lock()
+			s.selectedCandidate = pair
+			s.mu.Unlock()
+			stats.SelectedCandidate = pair
+		}
+	}
+	return stats
 }
 
 func (s *pionSession) Close() error {

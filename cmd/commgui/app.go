@@ -39,7 +39,8 @@ type App struct {
 
 	mu              sync.Mutex
 	activeCall      domain.CallSession
-	pendingIncoming *domain.IncomingCall
+	pendingIncoming       *domain.IncomingCall
+	pendingIncomingTimer  *time.Timer
 	listener        domain.Listener
 	listening       bool
 	listenerCtx     context.Context
@@ -53,6 +54,33 @@ type App struct {
 	callLog         []CallLogEntryDTO
 	debugLogMu      sync.Mutex
 	debugLogFile    *os.File
+}
+
+func (a *App) recordNetHealthFailure(source string, err error) {
+	nh := a.client.NetHealth()
+	if nh.RecordFailure() {
+		a.mu.Lock()
+		hasActiveCall := a.activeCall != nil
+		a.mu.Unlock()
+		if hasActiveCall {
+			nh.DeferRebuild()
+			a.logDebug("net_health_rebuild_deferred", nil)
+		} else {
+			nh.MarkRebuilt()
+			a.logDebug("net_health_rebuild", nil)
+			a.client.RebuildTransport()
+		}
+	}
+}
+
+func (a *App) recordNetHealthSuccess() {
+	a.client.NetHealth().RecordSuccess()
+}
+
+func (a *App) doRebuildTransport() {
+	a.client.NetHealth().MarkRebuilt()
+	a.logDebug("net_health_rebuild", nil)
+	a.client.RebuildTransport()
 }
 
 // ==============================================================================
@@ -214,10 +242,20 @@ func (a *App) startup(ctx context.Context) {
 // слот activeCall и перезапускает listener.
 // Listener restart в отдельной goroutine — чтобы "call-ended" ушёл во фронтенд
 // без задержки на открытие WebSocket.
-func (a *App) handleCallClosed() {
+func (a *App) handleCallClosed(failureReason string) {
+	nh := a.client.NetHealth()
+	// Записываем signal_lost и проверяем отложенный rebuild через общий трекер.
+	if failureReason == "signal_lost" {
+		a.logDebug("net_health_fail", map[string]any{"source": "callSession", "error": "signal_lost"})
+	}
+	if nh.HandleCallClosed(failureReason) {
+		a.doRebuildTransport()
+	}
+
 	a.mu.Lock()
 	a.activeCall = nil
 	a.mu.Unlock()
+
 	go a.restartListener()
 }
 
@@ -733,6 +771,7 @@ func (a *App) StartCall(contactId string) (CallResultDTO, error) {
 		EchoCancellation: a.audioPrefs.EchoCancellation,
 		AECTailMs:        a.audioPrefs.AECTailMs,
 		OnUnderrun:       a.onPlaybackUnderrun,
+		OnForeignOffer:   a.onForeignOfferForActiveSession,
 	})
 	if err != nil {
 		a.logDebug("outgoing_call_error", map[string]any{"error": err.Error(), "contact": contactId})
@@ -762,7 +801,7 @@ func (a *App) StartCall(contactId string) (CallResultDTO, error) {
 func (a *App) AcceptCall(callId string) error {
 	a.mu.Lock()
 	in := a.pendingIncoming
-	a.pendingIncoming = nil
+	a.pendingIncoming = nil; a.stopPendingTimerLocked()
 	a.mu.Unlock()
 
 	if in == nil {
@@ -814,7 +853,7 @@ func (a *App) AcceptCall(callId string) error {
 func (a *App) DeclineCall(callId string) error {
 	a.mu.Lock()
 	in := a.pendingIncoming
-	a.pendingIncoming = nil
+	a.pendingIncoming = nil; a.stopPendingTimerLocked()
 	a.mu.Unlock()
 
 	if in == nil {
@@ -833,6 +872,98 @@ func (a *App) DeclineCall(callId string) error {
 	return nil
 }
 
+// stopPendingTimerLocked останавливает таймер auto-decline. Вызывается под a.mu.
+func (a *App) stopPendingTimerLocked() {
+	if a.pendingIncomingTimer != nil {
+		a.pendingIncomingTimer.Stop()
+		a.pendingIncomingTimer = nil
+	}
+}
+
+// autoDeclinePending — авто-отклонение входящего по таймеру (§12.2).
+func (a *App) autoDeclinePending(callID string) {
+	a.mu.Lock()
+	in := a.pendingIncoming
+	if in == nil || in.CallID != callID {
+		a.mu.Unlock()
+		return
+	}
+	a.pendingIncoming = nil
+	a.pendingIncomingTimer = nil
+	a.mu.Unlock()
+
+	a.logDebug("incoming_call_auto_declined", map[string]any{"call_id": callID})
+	_ = in.DeclineWithReason(a.ctx, "missed")
+	a.logIncomingNotAnswered(in, "missed")
+	a.restartListener()
+}
+
+// shouldYieldToForeignOffer — лексикографическое сравнение callID для glare (§6a).
+// Меньший callID выигрывает.
+func shouldYieldToForeignOffer(localID, foreignID string) bool {
+	return localID > foreignID
+}
+
+// onForeignOfferForActiveSession — обработчик glare; передаётся в
+// callSessionConfig.onForeignOffer при создании Outgoing-сессии.
+func (a *App) onForeignOfferForActiveSession(fo domain.ForeignOffer) {
+	a.mu.Lock()
+	sess := a.activeCall
+	a.mu.Unlock()
+	if sess == nil {
+		return
+	}
+	if sess.State() != port.CallStateCalling {
+		return
+	}
+	if fo.From.UserID != sess.Peer().UserID {
+		return
+	}
+	if !shouldYieldToForeignOffer(sess.ID(), fo.CallID) {
+		a.logDebug("glare_won", map[string]any{
+			"local_call_id":   sess.ID(),
+			"foreign_call_id": fo.CallID,
+		})
+		return
+	}
+	a.logDebug("glare_yielding", map[string]any{
+		"local_call_id":   sess.ID(),
+		"foreign_call_id": fo.CallID,
+	})
+	sigConn, err := sess.YieldSigConn()
+	if err != nil {
+		a.logDebug("glare_yield_error", map[string]any{"error": err.Error()})
+		return
+	}
+	a.mu.Lock()
+	a.activeCall = nil
+	a.mu.Unlock()
+
+	// Accept в горутине — не блокируем pumpSignaling (§6a #2).
+	go func() {
+		in := a.client.Caller.IncomingFromForeignOffer(a.ctx, sigConn, fo)
+		sess2, err := in.Accept(a.ctx, domain.AcceptOpts{
+			AudioMode:        "real",
+			InputDeviceID:    a.audioPrefs.InputDeviceID,
+			OutputDeviceID:   a.audioPrefs.OutputDeviceID,
+			PlaybackBufferMs: a.audioPrefs.PlaybackBufferMs,
+			PlaybackPrebufMs: a.audioPrefs.PlaybackPrebufMs,
+			EchoCancellation: a.audioPrefs.EchoCancellation,
+			AECTailMs:        a.audioPrefs.AECTailMs,
+			OnUnderrun:       a.onPlaybackUnderrun,
+		})
+		if err != nil {
+			a.logDebug("glare_accept_error", map[string]any{"error": err.Error()})
+			a.restartListener()
+			return
+		}
+		a.mu.Lock()
+		a.activeCall = sess2
+		a.mu.Unlock()
+		a.bus.watchSession(sess2, fo.From.UserID, displayName(fo.From), "in-glare")
+	}()
+}
+
 // HangUp завершает активный звонок.
 func (a *App) HangUp() error {
 	a.mu.Lock()
@@ -844,7 +975,9 @@ func (a *App) HangUp() error {
 		return errors.New("no active call")
 	}
 	a.logDebug("hangup", map[string]any{"call_id": sess.ID()})
-	if err := sess.Hangup(a.ctx); err != nil {
+	hangupCtx, hangupCancel := context.WithTimeout(a.ctx, 3*time.Second)
+	defer hangupCancel()
+	if err := sess.Hangup(hangupCtx); err != nil {
 		a.logDebug("hangup_error", map[string]any{"call_id": sess.ID(), "error": err.Error()})
 		return err
 	}
@@ -1059,6 +1192,7 @@ func (a *App) pumpListener(ctx context.Context) {
 				"backoff_ms": backoff.Milliseconds(),
 			})
 			a.bus.emit("listener-error", err.Error())
+			a.recordNetHealthFailure("pumpListener", err)
 			select {
 			case <-ctx.Done():
 				return
@@ -1074,6 +1208,7 @@ func (a *App) pumpListener(ctx context.Context) {
 		a.listener = listener
 		a.mu.Unlock()
 		backoff = minBackoff
+	a.recordNetHealthSuccess()
 
 		delivered, displaced := a.runListener(ctx, listener)
 		a.mu.Lock()
@@ -1131,6 +1266,12 @@ func (a *App) runListener(ctx context.Context, listener domain.Listener) (delive
 
 			a.mu.Lock()
 			a.pendingIncoming = &in
+			if a.pendingIncomingTimer != nil {
+				a.pendingIncomingTimer.Stop()
+			}
+			a.pendingIncomingTimer = time.AfterFunc(35*time.Second, func() {
+				a.autoDeclinePending(in.CallID)
+			})
 			a.mu.Unlock()
 
 			a.logDebug("incoming_call_arrived", map[string]any{
@@ -1233,6 +1374,7 @@ func (a *App) pumpPush(ctx context.Context) {
 				"error":      err.Error(),
 				"backoff_ms": backoff.Milliseconds(),
 			})
+			a.recordNetHealthFailure("pumpPush", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -1247,6 +1389,7 @@ func (a *App) pumpPush(ctx context.Context) {
 }
 
 func (a *App) handlePushWakeup(w domain.PushWakeup) {
+	a.recordNetHealthSuccess()
 	a.logDebug("push_wakeup", map[string]any{
 		"kind":      w.Kind,
 		"wakeup_id": w.WakeupID,

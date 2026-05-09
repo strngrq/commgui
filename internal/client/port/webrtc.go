@@ -42,7 +42,7 @@ type ICEServer struct {
 //  5. Состояние ICE и завершение — через Events().
 //  6. По окончанию — Close (audio pipeline закрывается автоматически).
 type WebRTCSession interface {
-	CreateOffer() (SDP, error)
+	CreateOffer(opts CreateOfferOpts) (SDP, error)
 	CreateAnswer() (SDP, error)
 	SetLocalDescription(sdp SDP) error
 	SetRemoteDescription(sdp SDP) error
@@ -53,6 +53,11 @@ type WebRTCSession interface {
 
 	Stats() SessionStats
 	Close() error
+}
+
+// CreateOfferOpts — параметры для CreateOffer.
+type CreateOfferOpts struct {
+	ICERestart bool
 }
 
 // SessionEventKind — тип события WebRTC-сессии.
@@ -84,6 +89,11 @@ type SessionStats struct {
 	RTPSent     int
 	RTPReceived int
 	Duration    time.Duration
+	// SelectedCandidate — выбранная ICE-пара в формате
+	// "<localType>:<localAddr>:<localPort> -> <remoteType>:<remoteAddr>:<remotePort>".
+	// Пусто, пока пара не выбрана (ICE не дошёл до connected) или не удалось
+	// получить её через WebRTC API.
+	SelectedCandidate string
 }
 
 // SDP — Session Description Protocol.

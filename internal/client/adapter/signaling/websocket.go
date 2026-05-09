@@ -20,14 +20,19 @@ const (
 	pingTimeout        = 10 * time.Second
 )
 
-type WebSocketClient struct{}
+type WebSocketClient struct {
+	httpClientProvider func() *http.Client
+}
 
-func NewWebSocketClient() *WebSocketClient {
-	return &WebSocketClient{}
+func NewWebSocketClient(p func() *http.Client) *WebSocketClient {
+	if p == nil {
+		p = func() *http.Client { return &http.Client{} }
+	}
+	return &WebSocketClient{httpClientProvider: p}
 }
 
 func (w *WebSocketClient) OpenSignal(ctx context.Context, serverURL, token string) (port.SignalConn, error) {
-	conn, err := dialWS(ctx, serverURL, "/v1/ws/signal", "commsrv.signal.v2", token)
+	conn, err := w.dialWS(ctx, serverURL, "/v1/ws/signal", "commsrv.signal.v2", token)
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +47,7 @@ func (w *WebSocketClient) OpenSignal(ctx context.Context, serverURL, token strin
 }
 
 func (w *WebSocketClient) OpenPush(ctx context.Context, serverURL, token string) (port.PushConn, error) {
-	conn, err := dialWS(ctx, serverURL, "/v1/ws/push", "commsrv.push.v2", token)
+	conn, err := w.dialWS(ctx, serverURL, "/v1/ws/push", "commsrv.push.v2", token)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +61,7 @@ func (w *WebSocketClient) OpenPush(ctx context.Context, serverURL, token string)
 	return wc, nil
 }
 
-func dialWS(ctx context.Context, serverURL, path, subproto, token string) (*websocket.Conn, error) {
+func (w *WebSocketClient) dialWS(ctx context.Context, serverURL, path, subproto, token string) (*websocket.Conn, error) {
 	wsURL := strings.TrimRight(serverURL, "/") + path
 	switch {
 	case strings.HasPrefix(wsURL, "https://"):
@@ -68,6 +73,7 @@ func dialWS(ctx context.Context, serverURL, path, subproto, token string) (*webs
 	}
 	headers := http.Header{"Authorization": []string{"Bearer " + token}}
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPClient:   w.httpClientProvider(),
 		HTTPHeader:   headers,
 		Subprotocols: []string{subproto},
 	})

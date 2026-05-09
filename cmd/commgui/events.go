@@ -13,7 +13,7 @@ import (
 type eventBus struct {
 	ctx          context.Context
 	onCallEnded  func(CallLogEntryDTO)
-	onCallClosed func()
+	onCallClosed func(failureReason string)
 	logFn        func(string, map[string]any)
 }
 
@@ -84,7 +84,11 @@ func (b *eventBus) watchSession(sess domain.CallSession, peerUserID, peerName, d
 				})
 			case domain.CallEventClosed:
 				if b.onCallClosed != nil {
-					b.onCallClosed()
+					fr := ""
+					if ev.Result != nil {
+						fr = ev.Result.FailureReason
+					}
+					b.onCallClosed(fr)
 				}
 				result := map[string]any{
 					"callId":   sess.ID(),

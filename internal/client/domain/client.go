@@ -29,6 +29,8 @@ type Client struct {
 	state *port.State
 	priv  ed25519.PrivateKey
 
+	netHealth *NetHealthTracker
+
 	Registrar  *Registrar
 	Caller     *Caller
 	Contacts   *ContactBook
@@ -36,12 +38,20 @@ type Client struct {
 	Health     *HealthCheck
 }
 
+// RebuildTransport пересоздаёт HTTP Transport с новым Dialer (§6c).
+func (c *Client) RebuildTransport() {
+	if c == nil || c.ports.HTTP == nil {
+		return
+	}
+	c.ports.HTTP.Rebuild()
+}
+
 // NewClient создаёт Client для профиля. Если профиль ещё не инициализирован,
 // возвращается клиент с state=nil — методы, требующие state, вернут ErrNoState.
 // Это позволяет одному и тому же объекту использоваться для bootstrap-операций
 // (Init, Register, RegisterPreview) и для пост-bootstrap операций (Login, Call, …).
 func NewClient(profile string, ports Ports) *Client {
-	c := &Client{profile: profile, ports: ports}
+	c := &Client{profile: profile, ports: ports, netHealth: &NetHealthTracker{}}
 	if st, err := ports.State.Load(profile); err == nil && st != nil {
 		c.state = st
 		if priv, err := ports.Crypto.LoadPrivateKey(ports.State.ProfileDir(profile)); err == nil {
@@ -60,6 +70,9 @@ func NewClient(profile string, ports Ports) *Client {
 	}
 	return c
 }
+
+// NetHealth возвращает трекер сетевых ошибок для §6c recovery.
+func (c *Client) NetHealth() *NetHealthTracker { return c.netHealth }
 
 // Profile возвращает имя профиля.
 func (c *Client) Profile() string { return c.profile }

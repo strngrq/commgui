@@ -7,6 +7,9 @@ import (
 // HTTPClient — абстракция HTTP-клиента.
 type HTTPClient interface {
 	Do(req HTTPRequest) (*HTTPResponse, error)
+	// Rebuild пересоздаёт HTTP Transport с новым Dialer (§6c).
+	// Реализация по умолчанию — no-op.
+	Rebuild()
 }
 
 // HTTPRequest — параметры HTTP-запроса.

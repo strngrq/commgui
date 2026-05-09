@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+
 	"github.com/strngrq/commgui/internal/client/adapter/audio"
 	"github.com/strngrq/commgui/internal/client/adapter/crypto"
 	httpAdapter "github.com/strngrq/commgui/internal/client/adapter/http"
@@ -14,11 +16,12 @@ import (
 // defaultPorts собирает Ports со всеми реальными адаптерами.
 // Идентично cmd/commclient/wire.go.
 func defaultPorts() domain.Ports {
+	httpClient := httpAdapter.NewClient()
 	return domain.Ports{
 		State:     state.NewFileStore(),
 		Crypto:    crypto.NewEd25519Provider(),
-		HTTP:      httpAdapter.NewClient(),
-		Signaling: signaling.NewWebSocketClient(),
+		HTTP:      httpClient,
+		Signaling: signaling.NewWebSocketClient(func() *http.Client { return httpClient.HTTPClient() }),
 		WebRTC:    webrtc.NewPionManager(),
 		Audio:     audio.NewEngine(),
 		Turn:      turnAdapter.NewClient(),

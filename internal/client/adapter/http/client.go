@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/strngrq/commgui/internal/client/port"
@@ -17,15 +19,18 @@ import (
 )
 
 type Client struct {
+	mu    sync.RWMutex
+	inner *http.Client
+
 	signer func(*http.Request, []byte)
 }
 
 func NewClient() *Client {
-	return &Client{}
+	return &Client{inner: newDefaultHTTPClient()}
 }
 
 func NewSignedClient(privKey ed25519.PrivateKey) *Client {
-	c := &Client{}
+	c := &Client{inner: newDefaultHTTPClient()}
 	c.signer = func(req *http.Request, body []byte) {
 		ts := time.Now().UnixMilli()
 		req.Header.Set("X-Ts", fmt.Sprintf("%d", ts))
@@ -33,6 +38,40 @@ func NewSignedClient(privKey ed25519.PrivateKey) *Client {
 		req.Header.Set("X-Sig", cryptox.EncodeBase64URL(sig))
 	}
 	return c
+}
+
+func newDefaultHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:        100,
+			IdleConnTimeout:     90 * time.Second,
+			TLSHandshakeTimeout: 10 * time.Second,
+		},
+	}
+}
+
+// HTTPClient returns the underlying *http.Client for use by WebSocket dialer.
+func (c *Client) HTTPClient() *http.Client {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.inner
+}
+
+// Rebuild создаёт новый *http.Client с новым Transport и Dialer (§6c).
+// Старые idle-соединения закрываются, DNS-кеш сбрасывается.
+func (c *Client) Rebuild() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.inner != nil && c.inner.Transport != nil {
+		if t, ok := c.inner.Transport.(*http.Transport); ok {
+			t.CloseIdleConnections()
+		}
+	}
+	c.inner = newDefaultHTTPClient()
 }
 
 func (c *Client) Do(req port.HTTPRequest) (*port.HTTPResponse, error) {
@@ -58,7 +97,10 @@ func (c *Client) Do(req port.HTTPRequest) (*port.HTTPResponse, error) {
 		c.signer(httpReq, bodyBytes)
 	}
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	c.mu.RLock()
+	client := c.inner
+	c.mu.RUnlock()
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}

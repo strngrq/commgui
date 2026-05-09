@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/strngrq/commgui/internal/client/domain/callfsm"
 	"github.com/strngrq/commgui/internal/client/port"
 	"github.com/strngrq/commgui/internal/cryptox"
 	"github.com/strngrq/commgui/internal/proto"
@@ -67,6 +68,8 @@ type CallSession interface {
 	Events() <-chan CallEvent
 	Hangup(ctx context.Context) error
 	Stats() CallResult
+	// YieldSigConn уступает звонок встречному glare-оферу (§6a).
+	YieldSigConn() (port.SignalConn, error)
 }
 
 // OutgoingOpts — параметры исходящего звонка.
@@ -84,6 +87,7 @@ type OutgoingOpts struct {
 	EchoCancellation  bool
 	AECTailMs         int
 	OnUnderrun        func(count int)
+	OnForeignOffer    func(ForeignOffer) // §6a glare resolution
 }
 
 // AcceptOpts — параметры принятия входящего звонка.
@@ -122,9 +126,60 @@ func (i IncomingCall) Accept(ctx context.Context, opts AcceptOpts) (CallSession,
 	return i.caller.acceptIncoming(ctx, i, opts)
 }
 
+// RingOnly создаёт CallSession в Ringing без accept'а — ждёт ringTimeoutCallee
+// или EvUserDecline/EvPeerCancel. SigConn переходит в сессию. Используется
+// для e2e-тестирования auto-decline (§6b).
+func (i IncomingCall) RingOnly(ctx context.Context) (CallSession, error) {
+	if i.caller == nil {
+		return nil, errors.New("incoming call: zero value")
+	}
+	st := i.caller.state()
+	serverURL := chooseServer(st)
+	if serverURL == "" {
+		return nil, ErrMissingServerURL()
+	}
+	cs := newCallSession(callSessionConfig{
+		caller:          i.caller,
+		parentCtx:       ctx,
+		callID:          i.CallID,
+		peer:            i.From,
+		direction:       directionIncoming,
+		sigConn:         i.signaling,
+		rtc:             nil, // no WebRTC — just waiting for timeout
+		pipeline:        nil,
+		startState:      CallStateIncoming,
+		initialFSMState: callfsm.StateRinging,
+	})
+	// Start ringTimeoutCallee immediately.
+	// §11: ringTimeoutCallee = ringtime + 5s. Без знания ringtime пира
+	// используем консервативный дефолт 30s + 5s = 35s.
+	ringtime := 35 * time.Second
+	cs.startFSMTimer("ringTimeoutCallee", ringtime)
+	go cs.run()
+
+	// Return immediately — caller polls resultReady or Events.
+	return cs, nil
+}
+
 // Decline отклоняет звонок и закрывает signaling-соединение Listener'а.
 func (i IncomingCall) Decline(ctx context.Context) error {
 	return i.DeclineWithReason(ctx, "")
+}
+
+// IncomingFromForeignOffer собирает IncomingCall из ForeignOffer и yielded
+// sigConn. Используется на App-уровне в glare-сценарии (§6a).
+func (c *Caller) IncomingFromForeignOffer(
+	ctx context.Context, sigConn port.SignalConn, fo ForeignOffer,
+) IncomingCall {
+	return IncomingCall{
+		From:      fo.From,
+		CallID:    fo.CallID,
+		OfferSDP:  fo.OfferSDP,
+		Envelope:  fo.Envelope,
+		caller:    c,
+		signaling: sigConn,
+		parentCtx: ctx,
+	}
 }
 
 // DeclineWithReason отклоняет звонок с указанной причиной (например, "busy").
@@ -316,7 +371,7 @@ func (c *Caller) Outgoing(ctx context.Context, opts OutgoingOpts) (CallSession, 
 		return nil, err
 	}
 
-	offer, err := rtc.CreateOffer()
+	offer, err := rtc.CreateOffer(port.CreateOfferOpts{})
 	if err != nil {
 		_ = rtc.Close()
 		_ = sigConn.Close()
@@ -350,23 +405,25 @@ func (c *Caller) Outgoing(ctx context.Context, opts OutgoingOpts) (CallSession, 
 	}
 
 	cs := newCallSession(callSessionConfig{
-		caller:      c,
-		parentCtx:   ctx,
-		callID:      callID,
-		peer:        opts.Contact,
-		audioMode:   opts.AudioMode,
-		recordPath:  opts.RecordPath,
-		ringtime:    opts.Ringtime,
-		maxDuration: opts.MaxDuration,
-		direction:   directionOutgoing,
-		sigConn:     sigConn,
-		rtc:         rtc,
-		pipeline:       pipeline,
-		sentOfferEnvID: offerEnv.ID,
-		turnExpiresAt:  time.Now().Unix() + turnTTL,
-		turnUsername:   turnUser,
-		turnCredential: turnCred,
-		turnURIs:       turnURIs,
+		caller:          c,
+		parentCtx:       ctx,
+		callID:          callID,
+		peer:            opts.Contact,
+		audioMode:       opts.AudioMode,
+		recordPath:      opts.RecordPath,
+		ringtime:        opts.Ringtime,
+		maxDuration:     opts.MaxDuration,
+		direction:       directionOutgoing,
+		sigConn:         sigConn,
+		rtc:             rtc,
+		pipeline:        pipeline,
+		sentOfferEnvID:  offerEnv.ID,
+		initialFSMState: callfsm.StateCalling,
+		turnExpiresAt:   time.Now().Unix() + turnTTL,
+		turnUsername:    turnUser,
+		turnCredential:  turnCred,
+		turnURIs:        turnURIs,
+		onForeignOffer:  opts.OnForeignOffer,
 	})
 	cs.emit(CallEvent{Kind: CallEventTurnCredentials, Detail: map[string]any{
 		"uris":           turnURIs,
@@ -486,22 +543,23 @@ func (c *Caller) acceptIncoming(ctx context.Context, in IncomingCall, opts Accep
 	}
 
 	cs := newCallSession(callSessionConfig{
-		caller:      c,
-		parentCtx:   ctx,
-		callID:      in.CallID,
-		peer:        in.From,
-		audioMode:   opts.AudioMode,
-		recordPath:  opts.RecordPath,
-		maxDuration: opts.MaxDuration,
-		direction:   directionIncoming,
-		sigConn:     in.signaling,
-		rtc:         rtc,
-		pipeline:    pipeline,
-		startState:  CallStateActive,
-		turnExpiresAt:  time.Now().Unix() + turnTTL,
-		turnUsername:   turnUser,
-		turnCredential: turnCred,
-		turnURIs:       turnURIs,
+		caller:          c,
+		parentCtx:       ctx,
+		callID:          in.CallID,
+		peer:            in.From,
+		audioMode:       opts.AudioMode,
+		recordPath:      opts.RecordPath,
+		maxDuration:     opts.MaxDuration,
+		direction:       directionIncoming,
+		sigConn:         in.signaling,
+		rtc:             rtc,
+		pipeline:        pipeline,
+		startState:      CallStateActive,
+		initialFSMState: callfsm.StateConnecting,
+		turnExpiresAt:   time.Now().Unix() + turnTTL,
+		turnUsername:    turnUser,
+		turnCredential:  turnCred,
+		turnURIs:        turnURIs,
 	})
 	cs.emit(CallEvent{Kind: CallEventTurnCredentials, Detail: map[string]any{
 		"uris":           turnURIs,
