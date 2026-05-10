@@ -92,6 +92,11 @@ func newOpusDecoder() (*opusDecoder, error) {
 }
 
 func (d *opusDecoder) Decode(data []byte) ([]int16, error) {
+	// Android org.webrtc может слать пустые RTP-пакеты (DTX silence/comfort noise).
+	// &data[0] на пустом слайсе — panic.
+	if len(data) == 0 {
+		return make([]int16, opusFrameSize), nil
+	}
 	pcm := make([]int16, opusFrameSize)
 	n := C.decode_payload(
 		d.dec,
