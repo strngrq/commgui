@@ -44,8 +44,8 @@ type callTiming struct {
 	ICEConnected         time.Time // ICE перешёл в connected
 	FirstEventQRead      time.Time // первое событие прочитано из eventQ
 
-	EventQLatencySum time.Duration // сумма задержек eventQ
-	EventQEvents     int           // число замеров eventQ latency
+	EventQLatencySum  time.Duration // сумма задержек eventQ
+	EventQEvents      int           // число замеров eventQ latency
 	BootstrapDuration time.Duration // длительность bootstrap'а
 }
 
@@ -217,18 +217,18 @@ func newCallSession(cfg callSessionConfig) *callSession {
 	}
 
 	return &callSession{
-		cfg:           cfg,
-		started:       time.Now(),
-		state:         startState,
-		events:        make(chan CallEvent, 16),
-		ctx:           ctx,
-		cancel:        cancel,
-		resultReady:   make(chan struct{}),
-		peerPub:       ed25519.PublicKey(peerPub),
-		turnExpiresAt: cfg.turnExpiresAt,
-		turnUsername:  cfg.turnUsername,
+		cfg:            cfg,
+		started:        time.Now(),
+		state:          startState,
+		events:         make(chan CallEvent, 16),
+		ctx:            ctx,
+		cancel:         cancel,
+		resultReady:    make(chan struct{}),
+		peerPub:        ed25519.PublicKey(peerPub),
+		turnExpiresAt:  cfg.turnExpiresAt,
+		turnUsername:   cfg.turnUsername,
 		turnCredential: cfg.turnCredential,
-		turnURIs:      cfg.turnURIs,
+		turnURIs:       cfg.turnURIs,
 
 		// FSM fields
 		eventQ:   make(chan callfsm.Event, 64),
@@ -611,7 +611,6 @@ func (s *callSession) recreatePC() error {
 	return nil
 }
 
-
 // pumpLocalCandidates постит локальные ICE-кандидаты в eventQ.
 func (s *callSession) pumpLocalCandidates() {
 	s.rtcMu.RLock()
@@ -676,7 +675,6 @@ func splitFields(s string) []string {
 	return out
 }
 
-
 // shutdownWith однажды закрывает сессию: формирует финальный CallResult,
 // отправляет CallEventClosed, закрывает каналы и зависимости.
 //
@@ -707,11 +705,11 @@ func (s *callSession) shutdownWith(outcome string) {
 		s.cancel()
 
 		var stats port.SessionStats
-if s.cfg.rtc != nil {
-	s.rtcMu.RLock()
-	stats = s.cfg.rtc.Stats()
-	s.rtcMu.RUnlock()
-}
+		if s.cfg.rtc != nil {
+			s.rtcMu.RLock()
+			stats = s.cfg.rtc.Stats()
+			s.rtcMu.RUnlock()
+		}
 		// Если ICE когда-либо подключался — звонок состоялся, поднимаем
 		// любой не-success outcome до "answered". Покрывает: нормальный
 		// hangup, peer hangup, ctx timeout (--max-duration), ICE restart
@@ -738,7 +736,7 @@ if s.cfg.rtc != nil {
 			RTPReceived:       stats.RTPReceived,
 			SelectedCandidate: stats.SelectedCandidate,
 			TimingMs:          s.timingMs(),
-		FailureReason:     s.failureReason,
+			FailureReason:     s.failureReason,
 		}
 
 		s.mu.Lock()
@@ -758,7 +756,9 @@ if s.cfg.rtc != nil {
 		close(s.resultReady)
 
 		s.rtcMu.RLock()
-		if s.cfg.rtc != nil { _ = s.cfg.rtc.Close() }
+		if s.cfg.rtc != nil {
+			_ = s.cfg.rtc.Close()
+		}
 		s.rtcMu.RUnlock()
 		if !s.keepSigConn {
 			_ = s.cfg.sigConn.Close()
@@ -829,6 +829,9 @@ func (s *callSession) actorLoop() {
 				switch ev.Kind {
 				case callfsm.EvSignalReadErr, callfsm.EvSignalWriteErr:
 					s.failureReason = "signal_lost"
+					if ev.Err != nil {
+						s.failureReason = ev.Err.Error()
+					}
 				}
 			}
 			s.recordStateTiming(nextState)
@@ -842,7 +845,7 @@ func (s *callSession) actorLoop() {
 			if nextState == callfsm.StateClosed {
 				return
 			}
-			}
+		}
 	}
 }
 

@@ -7,18 +7,18 @@ import (
 
 // Exit codes per 004-test_client.md §5.2.
 const (
-	ExitOK                = 0
-	ExitGeneralError      = 1
-	ExitValidation        = 2
-	ExitNetwork           = 10
-	ExitAuthExpired       = 11
-	ExitForbidden         = 12
-	ExitServerError       = 20
-	ExitNotFound          = 21
-	ExitConflict          = 22
-	ExitCrypto            = 30
-	ExitAudio             = 40
-	ExitWebRTC            = 50
+	ExitOK           = 0
+	ExitGeneralError = 1
+	ExitValidation   = 2
+	ExitNetwork      = 10
+	ExitAuthExpired  = 11
+	ExitForbidden    = 12
+	ExitServerError  = 20
+	ExitNotFound     = 21
+	ExitConflict     = 22
+	ExitCrypto       = 30
+	ExitAudio        = 40
+	ExitWebRTC       = 50
 )
 
 // DomainError — ошибка бизнес-логики с кодом выхода и машиночитаемым кодом.

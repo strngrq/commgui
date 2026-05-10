@@ -82,12 +82,12 @@ type OutgoingOpts struct {
 	NoTurn           bool
 	MaxDuration      time.Duration
 	Ringtime         time.Duration
-	PlaybackBufferMs  int
-	PlaybackPrebufMs  int
-	EchoCancellation  bool
-	AECTailMs         int
-	OnUnderrun        func(count int)
-	OnForeignOffer    func(ForeignOffer) // §6a glare resolution
+	PlaybackBufferMs int
+	PlaybackPrebufMs int
+	EchoCancellation bool
+	AECTailMs        int
+	OnUnderrun       func(count int)
+	OnForeignOffer   func(ForeignOffer) // §6a glare resolution
 }
 
 // AcceptOpts — параметры принятия входящего звонка.
@@ -218,7 +218,7 @@ func (i IncomingCall) WatchCancel(ctx context.Context, onCancel func()) {
 			if err != nil {
 				continue
 			}
-			if payloadString(payload, "call_id") != i.CallID{
+			if payloadString(payload, "call_id") != i.CallID {
 				continue
 			}
 			switch payloadString(payload, "type") {
@@ -406,7 +406,7 @@ func (c *Caller) Outgoing(ctx context.Context, opts OutgoingOpts) (CallSession, 
 
 	cs := newCallSession(callSessionConfig{
 		caller:          c,
-		parentCtx:       ctx,
+		parentCtx:       context.Background(),
 		callID:          callID,
 		peer:            opts.Contact,
 		audioMode:       opts.AudioMode,
@@ -544,7 +544,7 @@ func (c *Caller) acceptIncoming(ctx context.Context, in IncomingCall, opts Accep
 
 	cs := newCallSession(callSessionConfig{
 		caller:          c,
-		parentCtx:       ctx,
+		parentCtx:       context.Background(),
 		callID:          in.CallID,
 		peer:            in.From,
 		audioMode:       opts.AudioMode,

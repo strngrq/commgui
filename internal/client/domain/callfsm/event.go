@@ -16,30 +16,30 @@ const (
 	EvInvalid EventKind = iota
 
 	// --- UI events (§4.1) ---
-	EvUserStartCall     // user tapped "call"
-	EvUserAccept        // user tapped "accept" on incoming call
-	EvUserDecline       // user tapped "decline" on incoming call
-	EvUserHangup        // user tapped "hangup"
-	EvYieldGlare        // App: yield this call to incoming glare offer (§6a)
+	EvUserStartCall // user tapped "call"
+	EvUserAccept    // user tapped "accept" on incoming call
+	EvUserDecline   // user tapped "decline" on incoming call
+	EvUserHangup    // user tapped "hangup"
+	EvYieldGlare    // App: yield this call to incoming glare offer (§6a)
 
 	// --- Signaling events (§4.2) — decrypted envelope payloads ---
-	EvOfferReceived     // call.offer from peer (new offer or ICE-restart, distinguished by callID)
-	EvAnswerReceived    // call.answer from peer
-	EvRemoteCandidate   // call.candidate from peer
-	EvPeerReject        // call.reject from peer
-	EvPeerHangup        // call.hangup from peer
-	EvPeerCancel        // call.cancel from peer
+	EvOfferReceived   // call.offer from peer (new offer or ICE-restart, distinguished by callID)
+	EvAnswerReceived  // call.answer from peer
+	EvRemoteCandidate // call.candidate from peer
+	EvPeerReject      // call.reject from peer
+	EvPeerHangup      // call.hangup from peer
+	EvPeerCancel      // call.cancel from peer
 
 	// --- Server control events (§4.3) ---
-	EvEnvelopeFailed    // server rejected our envelope (payload: envID)
-	EvEnvelopeAck       // server acknowledged our envelope (payload: envID)
-	EvSignalReadErr     // sigConn.Read() returned error — fatal in any live state except Ending (§4.7)
-	EvSignalWriteErr    // sigConn.Write() returned error — fatal except in Ending (§4.7)
+	EvEnvelopeFailed // server rejected our envelope (payload: envID)
+	EvEnvelopeAck    // server acknowledged our envelope (payload: envID)
+	EvSignalReadErr  // sigConn.Read() returned error — fatal in any live state except Ending (§4.7)
+	EvSignalWriteErr // sigConn.Write() returned error — fatal except in Ending (§4.7)
 
 	// --- WebRTC events (§4.5) ---
-	EvLocalCandidate    // pion gathered a local ICE candidate
-	EvICEStateChange    // ICE connection state changed (payload: ICEState)
-	EvICENeedsRestart   // derived: from ICE failed or disconnect-grace timer expiry
+	EvLocalCandidate  // pion gathered a local ICE candidate
+	EvICEStateChange  // ICE connection state changed (payload: ICEState)
+	EvICENeedsRestart // derived: from ICE failed or disconnect-grace timer expiry
 
 	// --- Timer events (§11) ---
 	EvRingTimeoutCaller  // caller: 30s from Calling start

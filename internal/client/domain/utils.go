@@ -79,4 +79,3 @@ func contactByUserID(st *port.State, userID string) (Contact, bool) {
 	}
 	return Contact{UserID: userID}, false
 }
-

@@ -120,7 +120,11 @@ type wsConn struct {
 }
 
 func (w *wsConn) Read(ctx context.Context, v interface{}) error {
-	return wsRead(ctx, w.conn, v)
+	err := wsRead(ctx, w.conn, v)
+	if err != nil && ctx.Err() == nil {
+		log.Printf("websocket read error: %v", err)
+	}
+	return err
 }
 
 func (w *wsConn) Write(ctx context.Context, v interface{}) error {

@@ -148,7 +148,7 @@ func (ActCloseAudioPipeline) isAction() {}
 
 // ActStartTimer starts a named timer. When it fires, an event is posted to eventQ.
 type ActStartTimer struct {
-	Name     string        // see 002.1 §11 for canonical names
+	Name     string // see 002.1 §11 for canonical names
 	Duration time.Duration
 }
 

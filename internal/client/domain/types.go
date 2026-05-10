@@ -33,33 +33,33 @@ type InitOpts struct {
 
 // InitResult — результат инициализации.
 type InitResult struct {
-	Profile   string `json:"profile"`
-	Pubkey    string `json:"pubkey"`
+	Profile     string `json:"profile"`
+	Pubkey      string `json:"pubkey"`
 	Fingerprint string `json:"fingerprint"`
 }
 
 // RegisterOpts — параметры регистрации.
 type RegisterOpts struct {
-	InviteURL                string
-	Name                     string
-	PreviewOnly              bool
-	ServerOverride           string
-	AcceptServerFingerprint  string
+	InviteURL               string
+	Name                    string
+	PreviewOnly             bool
+	ServerOverride          string
+	AcceptServerFingerprint string
 }
 
 // RegisterResult — результат регистрации.
 type RegisterResult struct {
-	UserID              string `json:"user_id"`
-	SessionTokenPresent bool   `json:"session_token_present"`
+	UserID              string       `json:"user_id"`
+	SessionTokenPresent bool         `json:"session_token_present"`
 	Inviter             *InviterInfo `json:"inviter,omitempty"`
-	Valid               bool   `json:"valid,omitempty"`
-	ServerURL           string `json:"server_url,omitempty"`
-	ServerPubkey        string `json:"server_pubkey,omitempty"`
-	ServerFP            string `json:"server_fp,omitempty"`
-	IssuedByName        string `json:"issued_by_name,omitempty"`
-	IssuedByPubkey      string `json:"issued_by_pubkey,omitempty"`
-	ExpiresAt           int64  `json:"expires_at,omitempty"`
-	RemainingUses       int    `json:"remaining_uses,omitempty"`
+	Valid               bool         `json:"valid,omitempty"`
+	ServerURL           string       `json:"server_url,omitempty"`
+	ServerPubkey        string       `json:"server_pubkey,omitempty"`
+	ServerFP            string       `json:"server_fp,omitempty"`
+	IssuedByName        string       `json:"issued_by_name,omitempty"`
+	IssuedByPubkey      string       `json:"issued_by_pubkey,omitempty"`
+	ExpiresAt           int64        `json:"expires_at,omitempty"`
+	RemainingUses       int          `json:"remaining_uses,omitempty"`
 }
 
 // InviterInfo — информация о пригласившем.
@@ -92,9 +92,9 @@ type AddContactOpts struct {
 
 // CreateInviteOpts — параметры создания инвайта.
 type CreateInviteOpts struct {
-	Label     string
-	TTL       time.Duration
-	MaxUses   int
+	Label   string
+	TTL     time.Duration
+	MaxUses int
 }
 
 // ListInvitesOpts — параметры списка инвайтов.
@@ -142,11 +142,11 @@ type EnvelopeAck struct {
 
 // EnvelopeWaitOpts — параметры ожидания envelope.
 type EnvelopeWaitOpts struct {
-	Count     int
-	Timeout   time.Duration
+	Count      int
+	Timeout    time.Duration
 	FilterType string
-	NoAck     bool
-	NDJSON    bool
+	NoAck      bool
+	NDJSON     bool
 }
 
 // EnvelopeSummary — краткая информация о полученном envelope.
@@ -221,10 +221,10 @@ type InvitePreview struct {
 
 // ContactURL — parsed contact URL.
 type ContactURL struct {
-	Server string
-	UserID string
-	Pubkey string
-	Name   string
+	Server      string
+	UserID      string
+	Pubkey      string
+	Name        string
 	Fingerprint string
 }
 
