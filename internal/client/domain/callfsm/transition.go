@@ -213,6 +213,19 @@ func transRinging(ev Event) (State, []Action) {
 	case EvSignalReadErr, EvSignalWriteErr:
 		return closed("failed")
 
+	case EvUserHangup:
+		// DeclineCall или авто-деклайн: отправляем call.reject.
+		return closedWith("declined-by-self",
+			ActSendEnvelope{PayloadType: "call.reject"},
+		)
+
+	case EvYieldGlare:
+		// AcceptCall: отдаём sigConn для acceptIncoming
+		// без закрытия (KeepSigConn=true).
+		return StateClosed, []Action{
+			ActFinalizeWithOutcome{Outcome: "yielded-glare", KeepSigConn: true},
+		}
+
 	default:
 		return same(StateRinging)
 	}

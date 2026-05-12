@@ -12,29 +12,30 @@ import (
 )
 
 // ParseInviteURL parses a privcall://invite#... URL.
+// Parameter values are URL-decoded (matching inviteURL which QueryEscape's them).
 func ParseInviteURL(invite string) (*InviteURL, error) {
 	parts := strings.Split(invite, "#")
 	if len(parts) != 2 {
 		return nil, ErrInvalidInvite("invalid invite URL")
 	}
 
-	values := map[string]string{}
-	for _, p := range strings.Split(parts[1], "&") {
-		kv := strings.SplitN(p, "=", 2)
-		if len(kv) == 2 {
-			values[kv[0]] = kv[1]
-		}
+	values, err := url.ParseQuery(parts[1])
+	if err != nil {
+		return nil, ErrInvalidInvite("invalid invite URL: " + err.Error())
 	}
 
-	server := values["s"]
+	server := values.Get("s")
+	if server == "" {
+		return nil, ErrInvalidInvite("invalid invite URL: missing server")
+	}
 	if !strings.HasPrefix(server, "http://") && !strings.HasPrefix(server, "https://") {
 		server = "https://" + server
 	}
 
 	return &InviteURL{
 		Server: server,
-		Token:  values["t"],
-		Srv:    values["srv"],
+		Token:  values.Get("t"),
+		Srv:    values.Get("srv"),
 	}, nil
 }
 

@@ -536,16 +536,21 @@ func (a *App) Rename(name string) error {
 }
 
 func (a *App) MyContact() (MyContactDTO, error) {
-	info, err := a.client.Contacts.Profile("")
+	ctx, cancel := context.WithTimeout(a.ctx, 15*time.Second)
+	defer cancel()
+	inv, err := a.client.Contacts.CreateInvite(ctx, domain.CreateInviteOpts{
+		TTL:     1 * time.Hour,
+		MaxUses: 1,
+	})
 	if err != nil {
 		return MyContactDTO{}, err
 	}
-	qrPNG, err := qrcode.Encode(info.ContactURL, qrcode.Medium, 256)
+	qrPNG, err := qrcode.Encode(inv.URL, qrcode.Medium, 256)
 	if err != nil {
 		return MyContactDTO{}, err
 	}
 	return MyContactDTO{
-		ContactURL: info.ContactURL,
+		ContactURL: inv.URL,
 		QRPngB64:   base64.StdEncoding.EncodeToString(qrPNG),
 	}, nil
 }

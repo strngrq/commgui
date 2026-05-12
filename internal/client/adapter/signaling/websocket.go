@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/strngrq/commgui/internal/client/port"
@@ -41,8 +43,8 @@ func (w *WebSocketClient) OpenSignal(ctx context.Context, serverURL, token strin
 		return nil, err
 	}
 	pingCtx, cancel := context.WithCancel(ctx)
-	wc := &wsConn{conn: conn, cancel: cancel}
-	go pingLoop(pingCtx, conn, signalPingInterval, pingTimeout)
+	wc := newWSConn(conn, cancel)
+	go pingLoop(pingCtx, conn, wc.id, signalPingInterval, pingTimeout)
 	return wc, nil
 }
 
@@ -56,8 +58,8 @@ func (w *WebSocketClient) OpenPush(ctx context.Context, serverURL, token string)
 		return nil, err
 	}
 	pingCtx, cancel := context.WithCancel(ctx)
-	wc := &wsConn{conn: conn, cancel: cancel}
-	go pingLoop(pingCtx, conn, pushPingInterval, pingTimeout)
+	wc := newWSConn(conn, cancel)
+	go pingLoop(pingCtx, conn, wc.id, pushPingInterval, pingTimeout)
 	return wc, nil
 }
 
@@ -115,14 +117,30 @@ func ackPushWakeup(ctx context.Context, conn *websocket.Conn) error {
 }
 
 type wsConn struct {
-	conn   *websocket.Conn
-	cancel context.CancelFunc
+	id       uint64
+	conn     *websocket.Conn
+	cancel   context.CancelFunc
+	readers  int32 // atomic: число горутин, находящихся в Read()
+}
+
+var wsConnNextID uint64
+
+func newWSConn(conn *websocket.Conn, cancel context.CancelFunc) *wsConn {
+	wsConnNextID++
+	return &wsConn{id: wsConnNextID, conn: conn, cancel: cancel}
 }
 
 func (w *wsConn) Read(ctx context.Context, v interface{}) error {
+	n := atomic.AddInt32(&w.readers, 1)
+	if n > 1 {
+		buf := make([]byte, 4096)
+		buf = buf[:runtime.Stack(buf, false)]
+		log.Printf("[ws:%d] CONCURRENT READ: %d goroutines in Read() — stack:\n%s", w.id, n, buf)
+	}
 	err := wsRead(ctx, w.conn, v)
+	atomic.AddInt32(&w.readers, -1)
 	if err != nil && ctx.Err() == nil {
-		log.Printf("websocket read error: %v", err)
+		log.Printf("[ws:%d] websocket read error: %v", w.id, err)
 	}
 	return err
 }
@@ -136,28 +154,29 @@ func (w *wsConn) Close() error {
 	return w.conn.Close(websocket.StatusNormalClosure, "closed")
 }
 
-func pingLoop(ctx context.Context, conn *websocket.Conn, interval, timeout time.Duration) {
+func pingLoop(ctx context.Context, conn *websocket.Conn, wsID uint64, interval, timeout time.Duration) {
+	log.Printf("pingLoop [ws:%d] started (interval=%v)", wsID, interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			log.Printf("pingLoop [ws:%d] stopped", wsID)
 			return
 		case <-ticker.C:
+			log.Printf("pingLoop [ws:%d] sending Ping", wsID)
 			pctx, cancel := context.WithTimeout(ctx, timeout)
 			err := conn.Ping(pctx)
 			cancel()
 			if err != nil {
-				// Штатное закрытие: wsConn.Close() отменяет ctx pingLoop'a — Ping
-				// вернёт context.Canceled. Это не ping_timeout, не шумим в логи и
-				// не пытаемся повторно закрыть соединение.
 				if ctx.Err() != nil {
 					return
 				}
-				log.Printf("websocket ping timeout: %v", err)
+				log.Printf("pingLoop [ws:%d] ping timeout: %v", wsID, err)
 				_ = conn.Close(websocket.StatusInternalError, "ping_timeout")
 				return
 			}
+			log.Printf("pingLoop [ws:%d] pong received", wsID)
 		}
 	}
 }
@@ -167,7 +186,11 @@ func wsRead(ctx context.Context, conn *websocket.Conn, target any) error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(raw, target)
+	if err := json.Unmarshal(raw, target); err != nil {
+		log.Printf("websocket json unmarshal error: %v (raw=%q)", err, truncateBytes(raw, 120))
+		return err
+	}
+	return nil
 }
 
 func wsWrite(ctx context.Context, conn *websocket.Conn, value any) error {
@@ -180,4 +203,11 @@ func wsWrite(ctx context.Context, conn *websocket.Conn, value any) error {
 
 func timeNowMillis() int64 {
 	return time.Now().UnixMilli()
+}
+
+func truncateBytes(b []byte, maxLen int) string {
+	if len(b) <= maxLen {
+		return string(b)
+	}
+	return string(b[:maxLen]) + "..."
 }

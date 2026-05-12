@@ -702,7 +702,9 @@ func (s *callSession) shutdownWith(outcome string) {
 			sendCancel()
 		}
 
-		s.cancel()
+		// s.cancel() отложен до закрытия resultReady: YieldSigConn
+		// во втором select ждёт resultReady || s.ctx.Done(). Если cancel
+		// раньше — s.ctx.Done() срабатывает первым и yield ломается.
 
 		var stats port.SessionStats
 		if s.cfg.rtc != nil {
@@ -754,6 +756,8 @@ func (s *callSession) shutdownWith(outcome string) {
 		s.mu.Unlock()
 
 		close(s.resultReady)
+
+		s.cancel()
 
 		s.rtcMu.RLock()
 		if s.cfg.rtc != nil {
