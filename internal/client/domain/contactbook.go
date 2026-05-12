@@ -48,11 +48,27 @@ func (b *ContactBook) List() ([]Contact, error) {
 }
 
 // Add добавляет контакт по privcall:// URL.
+// Поддерживает invite# (унифицированный) и add# (deprecated) форматы.
 func (b *ContactBook) Add(ctx context.Context, opts AddContactOpts) (*Contact, error) {
 	c := b.client
 	if err := c.requireState(); err != nil {
 		return nil, err
 	}
+
+	// Пробуем invite# сначала.
+	if parsed, err := ParseInviteURL(opts.ContactURL); err == nil && parsed.Token != "" {
+		res, err := b.AcceptInvite(ctx, opts.ContactURL)
+		if err != nil {
+			return nil, err
+		}
+		c.state.Contacts = upsertContact(c.state.Contacts, res.Contact)
+		if err := c.ports.State.Save(c.profile, c.state); err != nil {
+			return nil, err
+		}
+		return &res.Contact, nil
+	}
+
+	// Fallback: add# URL.
 	contact, err := ParseContactURL(opts.ContactURL, opts.Alias, opts.AutoVerify)
 	if err != nil {
 		return nil, err
@@ -154,6 +170,75 @@ func (b *ContactBook) CreateInvite(ctx context.Context, opts CreateInviteOpts) (
 		return nil, err
 	}
 	return &InviteResult{Token: res.Token, URL: res.URL, QRPayload: res.QRPayload}, nil
+}
+
+// AcceptInviteResult — результат принятия инвайта существующим пользователем.
+type AcceptInviteResult struct {
+	Contact Contact
+}
+
+// AcceptInvite принимает приглашение как существующий пользователь.
+// Вызывает POST /v1/invites/{token}/accept и возвращает контакт пригласившего.
+func (b *ContactBook) AcceptInvite(ctx context.Context, inviteURL string) (*AcceptInviteResult, error) {
+	c := b.client
+	if err := c.requireSession(); err != nil {
+		return nil, err
+	}
+
+	parsed, err := ParseInviteURL(inviteURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse invite URL: %w", err)
+	}
+	if parsed.Token == "" {
+		return nil, fmt.Errorf("not an invite URL: missing token")
+	}
+
+	serverURL := parsed.Server
+	body, _ := json.Marshal(struct{}{})
+	req := port.HTTPRequest{
+		Method: "POST",
+		URL:    serverURL + "/v1/invites/" + parsed.Token + "/accept",
+		Header: map[string]string{
+			"Content-Type":  "application/json",
+			"Authorization": "Bearer " + c.state.Session.Token,
+		},
+		Body: strings.NewReader(string(body)),
+	}
+
+	resp, err := c.Registrar.signedDo(&req)
+	if err != nil {
+		return nil, fmt.Errorf("accept invite: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		var er proto.ErrorResponse
+		_ = json.NewDecoder(resp.Body).Decode(&er)
+		if er.Error.Code != "" {
+			return nil, fmt.Errorf("%s: %s", er.Error.Code, er.Error.Message)
+		}
+		return nil, fmt.Errorf("server returned status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Contact struct {
+			UserID string `json:"user_id"`
+			Name   string `json:"name"`
+			Pubkey string `json:"pubkey"`
+		} `json:"contact"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	ct := Contact{
+		UserID:   result.Contact.UserID,
+		Name:     result.Contact.Name,
+		Pubkey:   result.Contact.Pubkey,
+		Verified: true,
+		AddedAt:  time.Now().UnixMilli(),
+	}
+	return &AcceptInviteResult{Contact: ct}, nil
 }
 
 // ListInvites возвращает инвайты пользователя с фильтром по статусу.

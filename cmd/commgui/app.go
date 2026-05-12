@@ -388,6 +388,25 @@ func (a *App) ListContacts() ([]ContactDTO, error) {
 }
 
 func (a *App) PreviewContact(rawURL string) (ContactPreviewDTO, error) {
+	// Пробуем invite# сначала (унифицированный формат).
+	if parsed, err := domain.ParseInviteURL(rawURL); err == nil && parsed.Token != "" {
+		ctx, cancel := context.WithTimeout(a.ctx, 15*time.Second)
+		defer cancel()
+		preview, err := a.client.Registrar.Register(ctx, domain.RegisterOpts{
+			InviteURL:   rawURL,
+			PreviewOnly: true,
+		})
+		if err != nil {
+			return ContactPreviewDTO{}, err
+		}
+		return ContactPreviewDTO{
+			Name:        preview.IssuedByName,
+			Pubkey:      preview.IssuedByPubkey,
+			Server:      preview.ServerURL,
+			Fingerprint: preview.ServerFP,
+		}, nil
+	}
+	// Fallback: add# URL.
 	contact, err := domain.ParseContactURL(rawURL, "", false)
 	if err != nil {
 		return ContactPreviewDTO{}, err
@@ -407,6 +426,24 @@ func (a *App) PreviewContact(rawURL string) (ContactPreviewDTO, error) {
 }
 
 func (a *App) AddContact(url, alias string) (ContactDTO, error) {
+	// Пробуем invite# сначала (унифицированный формат).
+	if parsed, err := domain.ParseInviteURL(url); err == nil && parsed.Token != "" {
+		res, err := a.client.Contacts.AcceptInvite(a.ctx, url)
+		if err != nil {
+			return ContactDTO{}, err
+		}
+		if err := a.client.Contacts.Upsert(a.ctx, res.Contact); err != nil {
+			return ContactDTO{}, err
+		}
+		return ContactDTO{
+			UserID:   res.Contact.UserID,
+			Name:     res.Contact.Name,
+			Pubkey:   res.Contact.Pubkey,
+			Alias:    alias,
+			Verified: res.Contact.Verified,
+		}, nil
+	}
+	// Fallback: add# URL.
 	c, err := a.client.Contacts.Add(a.ctx, domain.AddContactOpts{
 		ContactURL: url,
 		Alias:      alias,

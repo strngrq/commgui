@@ -450,7 +450,7 @@ export function AddContactScreen({ go, onBack }) {
           <textarea value={url} onChange={e => setUrl(e.target.value)}
             className="field-input mono"
             style={{ width: '100%', height: 80, padding: 12, fontSize: 13, resize: 'none' }}
-            placeholder="privcall://add#..." />
+            placeholder="privcall://invite#..." />
         </div>
         <button className="btn btn-tonal" style={{ marginTop: 8, alignSelf: 'flex-start' }} onClick={handleParse}>
           Распознать URL

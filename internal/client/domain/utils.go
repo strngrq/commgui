@@ -31,10 +31,14 @@ func ParseInviteURL(invite string) (*InviteURL, error) {
 	if !strings.HasPrefix(server, "http://") && !strings.HasPrefix(server, "https://") {
 		server = "https://" + server
 	}
+	token := values.Get("t")
+	if token == "" {
+		return nil, ErrInvalidInvite("invalid invite URL: missing token")
+	}
 
 	return &InviteURL{
 		Server: server,
-		Token:  values.Get("t"),
+		Token:  token,
 		Srv:    values.Get("srv"),
 	}, nil
 }
